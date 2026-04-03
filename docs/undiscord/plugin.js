@@ -43,88 +43,64 @@ var import_web$5 = __toESM(require_web(), 1);
 var import_web$6 = __toESM(require_web(), 1);
 var import_web$7 = __toESM(require_web(), 1);
 const _tmpl$ = /*#__PURE__*/ (0, import_web.template)(`<div><div class="field"><label>Regex Pattern (client-side)</label><!#><!/></div><div class="field-row"><div class="field"><label>Search Delay (ms)</label><!#><!/></div><div class="field"><label>Delete Delay (ms)</label><!#><!/></div></div></div>`, 22), _tmpl$2 = /*#__PURE__*/ (0, import_web.template)(`<div class="current-msg">Current: <!#><!/>...</div>`, 4), _tmpl$3 = /*#__PURE__*/ (0, import_web.template)(`<div>Error: <!#><!/></div>`, 4), _tmpl$4 = /*#__PURE__*/ (0, import_web.template)(`<div class="undiscord-progress"><div class="stat">Status: <b></b></div><div class="stat">Deleted: <b></b> | Skipped: <b></b> | Failed: <b></b></div><div class="stat">Estimated total: <b></b></div><!#><!/><!#><!/></div>`, 22), _tmpl$5 = /*#__PURE__*/ (0, import_web.template)(`<div class="undiscord-modal-body"><div class="context-info">Deleting your messages in: <b></b></div><div class="field"><label>Content Search</label><!#><!/></div><div class="field-row"><div class="field"><label>After Date</label><!#><!/></div><div class="field"><label>Before Date</label><!#><!/></div></div><!#><!/><!#><!/><!#><!/><div class="undiscord-advanced"><!#><!/> advanced options</div><!#><!/><div class="undiscord-buttons"><!#><!/><!#><!/></div><!#><!/></div>`, 46), _tmpl$6 = /*#__PURE__*/ (0, import_web.template)(`<div class="undiscord-modal-body"><!#><!/><!#><!/><!#><!/><div class="field-row"><div class="field"><label>Guild / Server ID</label><!#><!/></div><div class="field"><label>Channel ID</label><!#><!/></div></div><div></div><div class="field-row"><div class="field"><label>After Date</label><!#><!/></div><div class="field"><label>Before Date</label><!#><!/></div></div><div class="field"><label>Content Search</label><!#><!/></div><div class="field"><label>Regex Pattern</label><!#><!/></div><!#><!/><!#><!/><!#><!/><!#><!/><!#><!/><div class="field-row"><div class="field"><label>Search Delay (ms)</label><!#><!/></div><div class="field"><label>Delete Delay (ms)</label><!#><!/></div></div><div class="undiscord-buttons"><!#><!/><!#><!/></div><!#><!/></div>`, 82);
-const { flux: { stores }, plugin: { store, scoped }, settings: { registerSection }, observeDom, ui: { Header, HeaderTags, Text, TextBox, Button, ButtonColors, ButtonSizes, SwitchItem, Divider, showToast, openModal, ModalRoot, ModalHeader, ModalBody, ModalFooter, injectCss }, solid: { createSignal, Show } } = shelter;
+const { flux: { stores }, http, plugin: { store, scoped }, settings: { registerSection }, observeDom, ui: { Header, HeaderTags, Text, TextBox, Button, ButtonColors, ButtonSizes, SwitchItem, Divider, showToast, openModal, ModalRoot, ModalHeader, ModalBody, ModalFooter, injectCss }, solid: { createSignal, Show } } = shelter;
 const DISCORD_EPOCH = 1420070400000n;
 function dateToSnowflake(dateStr) {
 	const ts = new Date(dateStr).getTime();
 	if (isNaN(ts)) return null;
 	return String(BigInt(ts) - DISCORD_EPOCH << 22n);
 }
-async function discordFetch(url, options = {}) {
-	const token = getToken();
-	if (!token) throw new Error("Could not retrieve auth token");
-	const resp = await fetch(`https://discord.com/api/v9${url}`, {
-		...options,
-		headers: {
-			Authorization: token,
-			"Content-Type": "application/json",
-			...options.headers
-		}
-	});
+async function apiGet(url, retries = 3) {
+	const resp = await http.get({ url });
 	if (resp.status === 429) {
-		const data = await resp.json();
-		const retryAfter = (data.retry_after || 1) * 1e3;
+		const retryAfter = (resp.body?.retry_after || 1) * 1e3;
 		await sleep(retryAfter * 2);
-		return discordFetch(url, options);
+		return apiGet(url, retries - 1);
 	}
 	if (resp.status === 202) {
-		const data = await resp.json();
-		const retryAfter = (data.retry_after || 2) * 1e3;
+		const retryAfter = (resp.body?.retry_after || 2) * 1e3;
 		await sleep(retryAfter);
-		return discordFetch(url, options);
+		return apiGet(url, retries - 1);
 	}
 	return resp;
 }
-function getToken() {
-	try {
-		const mods = webpackChunkdiscord_app.push([
-			[Symbol()],
-			{},
-			(r) => {
-				const cache = r.c;
-				webpackChunkdiscord_app.pop();
-				return cache;
-			}
-		]);
-		for (const id in mods) {
-			const mod = mods[id]?.exports;
-			if (mod?.default?.getToken) return mod.default.getToken();
-			if (mod?.getToken) return mod.getToken();
-		}
-	} catch {}
-	return null;
+async function apiDelete(url, retries = 3) {
+	const resp = await http.del({ url });
+	if (resp.status === 429 && retries > 0) {
+		const retryAfter = (resp.body?.retry_after || 1) * 1e3;
+		await sleep(retryAfter * 2);
+		return apiDelete(url, retries - 1);
+	}
+	return resp;
 }
 function sleep(ms) {
 	return new Promise((r) => setTimeout(r, ms));
 }
 async function searchMessages(guildId, channelId, authorId, opts = {}) {
-	const params = new URLSearchParams();
-	if (authorId) params.set("author_id", authorId);
-	if (channelId && guildId !== "@me") params.set("channel_id", channelId);
-	if (opts.minId) params.set("min_id", opts.minId);
-	if (opts.maxId) params.set("max_id", opts.maxId);
-	if (opts.content) params.set("content", opts.content);
+	const query = {};
+	if (authorId) query.author_id = authorId;
+	if (channelId && guildId !== "@me") query.channel_id = channelId;
+	if (opts.minId) query.min_id = opts.minId;
+	if (opts.maxId) query.max_id = opts.maxId;
+	if (opts.content) query.content = opts.content;
+	if (opts.includeNsfw) query.include_nsfw = "true";
+	query.sort_by = "timestamp";
+	query.sort_order = "desc";
+	if (opts.offset) query.offset = String(opts.offset);
+	const params = new URLSearchParams(query);
 	if (opts.hasLink) params.append("has", "link");
 	if (opts.hasFile) params.append("has", "file");
-	if (opts.includeNsfw) params.set("include_nsfw", "true");
-	params.set("sort_by", "timestamp");
-	params.set("sort_order", "desc");
-	if (opts.offset) params.set("offset", String(opts.offset));
 	const base = guildId === "@me" ? `/channels/${channelId}/messages/search` : `/guilds/${guildId}/messages/search`;
-	const resp = await discordFetch(`${base}?${params.toString()}`);
-	if (!resp.ok) {
-		const text = await resp.text();
-		throw new Error(`Search failed (${resp.status}): ${text}`);
-	}
-	return resp.json();
+	const resp = await apiGet(`${base}?${params.toString()}`);
+	if (!resp.ok) throw new Error(`Search failed (${resp.status}): ${JSON.stringify(resp.body)}`);
+	return resp.body;
 }
 async function deleteMessage(channelId, messageId) {
-	const resp = await discordFetch(`/channels/${channelId}/messages/${messageId}`, { method: "DELETE" });
+	const resp = await apiDelete(`/channels/${channelId}/messages/${messageId}`);
 	if (resp.status === 204) return "OK";
 	if (resp.status === 404) return "SKIP";
 	if (resp.status === 403) return "FORBIDDEN";
-	const text = await resp.text();
-	throw new Error(`Delete failed (${resp.status}): ${text}`);
+	throw new Error(`Delete failed (${resp.status}): ${JSON.stringify(resp.body)}`);
 }
 let running = false;
 let stopRequested = false;

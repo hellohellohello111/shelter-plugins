@@ -1,5 +1,6 @@
 const {
   flux: { stores },
+  http,
   plugin: { store, scoped },
   settings: { registerSection },
   observeDom,
@@ -33,55 +34,35 @@ function dateToSnowflake(dateStr) {
   return String((BigInt(ts) - DISCORD_EPOCH) << 22n);
 }
 
-// ── Rate-limited fetch wrapper ──
-async function discordFetch(url, options = {}) {
-  const token = getToken();
-  if (!token) throw new Error("Could not retrieve auth token");
-
-  const resp = await fetch(`https://discord.com/api/v9${url}`, {
-    ...options,
-    headers: {
-      Authorization: token,
-      "Content-Type": "application/json",
-      ...options.headers,
-    },
-  });
+// ── API helpers using shelter's http module (auto-authenticated) ──
+async function apiGet(url, retries = 3) {
+  const resp = await http.get({ url });
 
   if (resp.status === 429) {
-    const data = await resp.json();
-    const retryAfter = (data.retry_after || 1) * 1000;
+    const retryAfter = (resp.body?.retry_after || 1) * 1000;
     await sleep(retryAfter * 2);
-    return discordFetch(url, options);
+    return apiGet(url, retries - 1);
   }
 
   if (resp.status === 202) {
-    const data = await resp.json();
-    const retryAfter = (data.retry_after || 2) * 1000;
+    const retryAfter = (resp.body?.retry_after || 2) * 1000;
     await sleep(retryAfter);
-    return discordFetch(url, options);
+    return apiGet(url, retries - 1);
   }
 
   return resp;
 }
 
-function getToken() {
-  try {
-    const mods = webpackChunkdiscord_app.push([
-      [Symbol()],
-      {},
-      (r) => {
-        const cache = r.c;
-        webpackChunkdiscord_app.pop();
-        return cache;
-      },
-    ]);
-    for (const id in mods) {
-      const mod = mods[id]?.exports;
-      if (mod?.default?.getToken) return mod.default.getToken();
-      if (mod?.getToken) return mod.getToken();
-    }
-  } catch {}
-  return null;
+async function apiDelete(url, retries = 3) {
+  const resp = await http.del({ url });
+
+  if (resp.status === 429 && retries > 0) {
+    const retryAfter = (resp.body?.retry_after || 1) * 1000;
+    await sleep(retryAfter * 2);
+    return apiDelete(url, retries - 1);
+  }
+
+  return resp;
 }
 
 function sleep(ms) {
@@ -90,43 +71,41 @@ function sleep(ms) {
 
 // ── Search messages ──
 async function searchMessages(guildId, channelId, authorId, opts = {}) {
-  const params = new URLSearchParams();
-  if (authorId) params.set("author_id", authorId);
-  if (channelId && guildId !== "@me") params.set("channel_id", channelId);
-  if (opts.minId) params.set("min_id", opts.minId);
-  if (opts.maxId) params.set("max_id", opts.maxId);
-  if (opts.content) params.set("content", opts.content);
+  const query = {};
+  if (authorId) query.author_id = authorId;
+  if (channelId && guildId !== "@me") query.channel_id = channelId;
+  if (opts.minId) query.min_id = opts.minId;
+  if (opts.maxId) query.max_id = opts.maxId;
+  if (opts.content) query.content = opts.content;
+  if (opts.includeNsfw) query.include_nsfw = "true";
+  query.sort_by = "timestamp";
+  query.sort_order = "desc";
+  if (opts.offset) query.offset = String(opts.offset);
+
+  // has[] needs special handling — build URL manually
+  const params = new URLSearchParams(query);
   if (opts.hasLink) params.append("has", "link");
   if (opts.hasFile) params.append("has", "file");
-  if (opts.includeNsfw) params.set("include_nsfw", "true");
-  params.set("sort_by", "timestamp");
-  params.set("sort_order", "desc");
-  if (opts.offset) params.set("offset", String(opts.offset));
 
   const base =
     guildId === "@me"
       ? `/channels/${channelId}/messages/search`
       : `/guilds/${guildId}/messages/search`;
 
-  const resp = await discordFetch(`${base}?${params.toString()}`);
+  const resp = await apiGet(`${base}?${params.toString()}`);
   if (!resp.ok) {
-    const text = await resp.text();
-    throw new Error(`Search failed (${resp.status}): ${text}`);
+    throw new Error(`Search failed (${resp.status}): ${JSON.stringify(resp.body)}`);
   }
-  return resp.json();
+  return resp.body;
 }
 
 // ── Delete a single message ──
 async function deleteMessage(channelId, messageId) {
-  const resp = await discordFetch(
-    `/channels/${channelId}/messages/${messageId}`,
-    { method: "DELETE" }
-  );
+  const resp = await apiDelete(`/channels/${channelId}/messages/${messageId}`);
   if (resp.status === 204) return "OK";
   if (resp.status === 404) return "SKIP";
   if (resp.status === 403) return "FORBIDDEN";
-  const text = await resp.text();
-  throw new Error(`Delete failed (${resp.status}): ${text}`);
+  throw new Error(`Delete failed (${resp.status}): ${JSON.stringify(resp.body)}`);
 }
 
 // ── Main deletion engine ──
