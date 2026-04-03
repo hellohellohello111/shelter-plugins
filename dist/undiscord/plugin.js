@@ -126,78 +126,107 @@ async function runDeletion(config, label) {
 	const minId = afterDate ? dateToSnowflake(afterDate) : null;
 	const maxId = beforeDate ? dateToSnowflake(beforeDate) : null;
 	const regex = pattern ? new RegExp(pattern, "i") : null;
-	let deleted = 0, skipped = 0, failed = 0, offset = 0, totalEstimate = 0;
+	let deleted = 0, skipped = 0, failed = 0;
 	const userId = authorId || stores.UserStore?.getCurrentUser()?.id;
+	const SYSTEM_TYPES = new Set([
+		1,
+		2,
+		3,
+		4,
+		5
+	]);
 	showFloatingPill();
+	const passes = [];
+	if (hasLink || hasFile) passes.push({
+		hasLink,
+		hasFile,
+		label: "filtered"
+	});
+else {
+		passes.push({
+			hasLink: false,
+			hasFile: false,
+			label: "text"
+		});
+		passes.push({
+			hasLink: false,
+			hasFile: true,
+			label: "files"
+		});
+		passes.push({
+			hasLink: true,
+			hasFile: false,
+			label: "links"
+		});
+	}
 	try {
-		while (!stopRequested) {
-			broadcastProgress({
-				status: "searching",
-				deleted,
-				skipped,
-				failed,
-				totalEstimate
-			});
-			const data = await searchMessages(guildId, channelId, userId, {
-				minId,
-				maxId,
-				content,
-				hasLink,
-				hasFile,
-				includeNsfw,
-				offset
-			});
-			totalEstimate = data.total_results || 0;
-			if (!data.messages || data.messages.length === 0) break;
-			const hits = data.messages.flat().filter((m) => m.hit);
-			if (hits.length === 0) break;
-			let pageSkipped = 0;
-			for (const msg of hits) {
-				if (stopRequested) break;
-				const SYSTEM_TYPES = new Set([
-					1,
-					2,
-					3,
-					4,
-					5
-				]);
-				if (SYSTEM_TYPES.has(msg.type)) {
-					pageSkipped++;
-					skipped++;
-					continue;
-				}
-				if (msg.pinned && !includePinned) {
-					pageSkipped++;
-					skipped++;
-					continue;
-				}
-				if (regex && !regex.test(msg.content)) {
-					pageSkipped++;
-					skipped++;
-					continue;
-				}
+		for (const pass of passes) {
+			if (stopRequested) break;
+			let offset = 0;
+			let totalEstimate = 0;
+			while (!stopRequested) {
 				broadcastProgress({
-					status: "deleting",
+					status: `searching (${pass.label})`,
 					deleted,
 					skipped,
 					failed,
-					totalEstimate,
-					currentMessage: msg.content?.substring(0, 80)
+					totalEstimate
 				});
-				const result = await deleteMessage(msg.channel_id, msg.id);
-				if (result === "OK") deleted++;
+				const data = await searchMessages(guildId, channelId, userId, {
+					minId,
+					maxId,
+					content,
+					hasLink: pass.hasLink,
+					hasFile: pass.hasFile,
+					includeNsfw,
+					offset
+				});
+				totalEstimate = data.total_results || 0;
+				if (!data.messages || data.messages.length === 0) break;
+				const hits = data.messages.flat().filter((m) => m.hit);
+				if (hits.length === 0) break;
+				let pageSkipped = 0;
+				for (const msg of hits) {
+					if (stopRequested) break;
+					if (SYSTEM_TYPES.has(msg.type)) {
+						pageSkipped++;
+						skipped++;
+						continue;
+					}
+					if (msg.pinned && !includePinned) {
+						pageSkipped++;
+						skipped++;
+						continue;
+					}
+					if (regex && msg.content && !regex.test(msg.content)) {
+						pageSkipped++;
+						skipped++;
+						continue;
+					}
+					const preview = msg.content?.substring(0, 80) || (msg.attachments?.length ? `[${msg.attachments.length} attachment(s)]` : "") || (msg.embeds?.length ? `[${msg.embeds.length} embed(s)]` : "[message]");
+					broadcastProgress({
+						status: "deleting",
+						deleted,
+						skipped,
+						failed,
+						totalEstimate,
+						currentMessage: preview
+					});
+					const result = await deleteMessage(msg.channel_id, msg.id);
+					if (result === "OK") deleted++;
 else if (result === "SKIP") {
-					skipped++;
-					pageSkipped++;
-				} else if (result === "FORBIDDEN") {
-					failed++;
-					pageSkipped++;
+						skipped++;
+						pageSkipped++;
+					} else if (result === "FORBIDDEN") {
+						failed++;
+						pageSkipped++;
+					}
+					await sleep(deleteDelay);
 				}
-				await sleep(deleteDelay);
-			}
-			if (pageSkipped === hits.length) offset += pageSkipped;
+				if (pageSkipped === hits.length) offset += pageSkipped;
 else offset = 0;
-			await sleep(searchDelay);
+				await sleep(searchDelay);
+			}
 		}
 	} catch (err) {
 		broadcastProgress({
@@ -205,7 +234,7 @@ else offset = 0;
 			deleted,
 			skipped,
 			failed,
-			totalEstimate,
+			totalEstimate: 0,
 			error: err.message
 		});
 		running = false;
@@ -217,7 +246,7 @@ else offset = 0;
 		deleted,
 		skipped,
 		failed,
-		totalEstimate
+		totalEstimate: 0
 	});
 	showToast({
 		title: "Undiscord",
