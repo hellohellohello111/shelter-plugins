@@ -500,20 +500,20 @@ const styles = `
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 8px 14px;
-  border-radius: 20px;
-  background: var(--background-floating);
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
-  color: var(--text-normal);
+  padding: 10px 16px;
+  border-radius: 22px;
+  background: #ffffff;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.35);
+  color: #1a1a1a;
   font-size: 13px;
-  font-weight: 500;
+  font-weight: 600;
   cursor: pointer;
   transition: transform 0.15s, box-shadow 0.15s;
   animation: undiscord-pill-in 0.3s ease-out;
 }
 .undiscord-pill:hover {
   transform: scale(1.05);
-  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.4);
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.45);
 }
 .undiscord-pill-icon {
   display: flex;
@@ -522,7 +522,7 @@ const styles = `
 .undiscord-pill-icon svg {
   width: 16px;
   height: 16px;
-  stroke: var(--status-danger);
+  stroke: #e03e3e;
 }
 @keyframes undiscord-pill-in {
   from { opacity: 0; transform: translateY(16px); }
