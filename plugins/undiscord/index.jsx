@@ -2,6 +2,7 @@ const {
   flux: { stores },
   plugin: { store, scoped },
   settings: { registerSection },
+  observeDom,
   ui: {
     Header,
     HeaderTags,
@@ -20,7 +21,7 @@ const {
     ModalFooter,
     injectCss,
   },
-  solid: { createSignal, createEffect, onCleanup, Show },
+  solid: { createSignal, Show },
 } = shelter;
 
 // ── Discord epoch for snowflake conversion ──
@@ -64,7 +65,6 @@ async function discordFetch(url, options = {}) {
 }
 
 function getToken() {
-  // grab token from webpack internals
   try {
     const mods = webpackChunkdiscord_app.push([
       [Symbol()],
@@ -123,7 +123,7 @@ async function deleteMessage(channelId, messageId) {
     { method: "DELETE" }
   );
   if (resp.status === 204) return "OK";
-  if (resp.status === 404) return "SKIP"; // already deleted
+  if (resp.status === 404) return "SKIP";
   if (resp.status === 403) return "FORBIDDEN";
   const text = await resp.text();
   throw new Error(`Delete failed (${resp.status}): ${text}`);
@@ -138,31 +138,17 @@ async function runDeletion(config, onProgress) {
   stopRequested = false;
 
   const {
-    guildId,
-    channelId,
-    authorId,
-    beforeDate,
-    afterDate,
-    content,
-    hasLink,
-    hasFile,
-    includeNsfw,
-    includePinned,
-    pattern,
-    searchDelay,
-    deleteDelay,
+    guildId, channelId, authorId,
+    beforeDate, afterDate, content,
+    hasLink, hasFile, includeNsfw, includePinned,
+    pattern, searchDelay, deleteDelay,
   } = config;
 
   const minId = afterDate ? dateToSnowflake(afterDate) : null;
   const maxId = beforeDate ? dateToSnowflake(beforeDate) : null;
   const regex = pattern ? new RegExp(pattern, "i") : null;
 
-  let deleted = 0;
-  let skipped = 0;
-  let failed = 0;
-  let offset = 0;
-  let totalEstimate = 0;
-
+  let deleted = 0, skipped = 0, failed = 0, offset = 0, totalEstimate = 0;
   const userId = authorId || stores.UserStore?.getCurrentUser()?.id;
 
   try {
@@ -170,26 +156,13 @@ async function runDeletion(config, onProgress) {
       onProgress({ status: "searching", deleted, skipped, failed, totalEstimate });
 
       const data = await searchMessages(guildId, channelId, userId, {
-        minId,
-        maxId,
-        content,
-        hasLink,
-        hasFile,
-        includeNsfw,
-        offset,
+        minId, maxId, content, hasLink, hasFile, includeNsfw, offset,
       });
 
       totalEstimate = data.total_results || 0;
+      if (!data.messages || data.messages.length === 0) break;
 
-      if (!data.messages || data.messages.length === 0) {
-        break;
-      }
-
-      // flatten & extract hits
-      const hits = data.messages
-        .flat()
-        .filter((m) => m.hit);
-
+      const hits = data.messages.flat().filter((m) => m.hit);
       if (hits.length === 0) break;
 
       let pageSkipped = 0;
@@ -197,94 +170,89 @@ async function runDeletion(config, onProgress) {
       for (const msg of hits) {
         if (stopRequested) break;
 
-        // filter: only own messages (types 0, 6-21)
         const t = msg.type;
-        if (t !== 0 && (t < 6 || t > 21)) {
-          pageSkipped++;
-          skipped++;
-          continue;
-        }
-
-        // filter: pinned
-        if (msg.pinned && !includePinned) {
-          pageSkipped++;
-          skipped++;
-          continue;
-        }
-
-        // filter: regex
-        if (regex && !regex.test(msg.content)) {
-          pageSkipped++;
-          skipped++;
-          continue;
-        }
+        if (t !== 0 && (t < 6 || t > 21)) { pageSkipped++; skipped++; continue; }
+        if (msg.pinned && !includePinned) { pageSkipped++; skipped++; continue; }
+        if (regex && !regex.test(msg.content)) { pageSkipped++; skipped++; continue; }
 
         onProgress({
-          status: "deleting",
-          deleted,
-          skipped,
-          failed,
-          totalEstimate,
+          status: "deleting", deleted, skipped, failed, totalEstimate,
           currentMessage: msg.content?.substring(0, 80),
         });
 
         const result = await deleteMessage(msg.channel_id, msg.id);
-        if (result === "OK") {
-          deleted++;
-        } else if (result === "SKIP") {
-          skipped++;
-          pageSkipped++;
-        } else if (result === "FORBIDDEN") {
-          failed++;
-          pageSkipped++;
-        }
+        if (result === "OK") deleted++;
+        else if (result === "SKIP") { skipped++; pageSkipped++; }
+        else if (result === "FORBIDDEN") { failed++; pageSkipped++; }
 
         await sleep(deleteDelay);
       }
 
-      // if all messages on this page were skipped, bump offset
-      if (pageSkipped === hits.length) {
-        offset += pageSkipped;
-      } else {
-        offset = 0; // deleted messages shift results, reset offset
-      }
+      if (pageSkipped === hits.length) offset += pageSkipped;
+      else offset = 0;
 
       await sleep(searchDelay);
     }
   } catch (err) {
-    onProgress({
-      status: "error",
-      deleted,
-      skipped,
-      failed,
-      totalEstimate,
-      error: err.message,
-    });
+    onProgress({ status: "error", deleted, skipped, failed, totalEstimate, error: err.message });
     running = false;
     return;
   }
 
   running = false;
-  onProgress({
-    status: "done",
-    deleted,
-    skipped,
-    failed,
-    totalEstimate,
-  });
+  onProgress({ status: "done", deleted, skipped, failed, totalEstimate });
 }
 
 function stopDeletion() {
   stopRequested = true;
 }
 
-// ── UI ──
+// ── Get current channel info ──
+function getCurrentContext() {
+  const guildId = stores.SelectedGuildStore?.getGuildId() || "@me";
+  const channelId = stores.SelectedChannelStore?.getChannelId();
+  let channelName = "";
+  let guildName = "";
+
+  try {
+    if (channelId) {
+      const channel = stores.ChannelStore?.getChannel(channelId);
+      channelName = channel?.name || (guildId === "@me" ? "DM" : "");
+    }
+    if (guildId && guildId !== "@me") {
+      const guild = stores.GuildStore?.getGuild(guildId);
+      guildName = guild?.name || "";
+    }
+  } catch {}
+
+  return { guildId, channelId, channelName, guildName };
+}
+
+// ── Styles ──
 const styles = `
-.undiscord-panel {
+.undiscord-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 4px;
+  cursor: pointer;
+  color: var(--interactive-normal);
+  transition: color 0.15s;
+}
+.undiscord-btn:hover {
+  color: var(--interactive-hover);
+}
+.undiscord-btn svg {
+  width: 20px;
+  height: 20px;
+}
+.undiscord-modal-body {
   padding: 16px;
   color: var(--text-normal);
 }
-.undiscord-panel label {
+.undiscord-modal-body label {
   display: block;
   margin-bottom: 4px;
   font-size: 12px;
@@ -292,15 +260,26 @@ const styles = `
   text-transform: uppercase;
   color: var(--header-secondary);
 }
-.undiscord-panel .field {
+.undiscord-modal-body .field {
   margin-bottom: 12px;
 }
-.undiscord-panel .field-row {
+.undiscord-modal-body .field-row {
   display: flex;
   gap: 12px;
 }
-.undiscord-panel .field-row > .field {
+.undiscord-modal-body .field-row > .field {
   flex: 1;
+}
+.undiscord-modal-body .context-info {
+  padding: 8px 12px;
+  margin-bottom: 12px;
+  border-radius: 6px;
+  background: var(--background-secondary);
+  font-size: 13px;
+  color: var(--text-muted);
+}
+.undiscord-modal-body .context-info b {
+  color: var(--text-normal);
 }
 .undiscord-progress {
   margin-top: 12px;
@@ -310,12 +289,8 @@ const styles = `
   font-size: 14px;
   line-height: 1.6;
 }
-.undiscord-progress .stat {
-  color: var(--text-muted);
-}
-.undiscord-progress .stat b {
-  color: var(--text-normal);
-}
+.undiscord-progress .stat { color: var(--text-muted); }
+.undiscord-progress .stat b { color: var(--text-normal); }
 .undiscord-progress .current-msg {
   margin-top: 6px;
   font-size: 12px;
@@ -329,8 +304,179 @@ const styles = `
   gap: 8px;
   margin-top: 12px;
 }
+.undiscord-advanced {
+  margin-top: 8px;
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--text-link);
+  user-select: none;
+}
 `;
 
+// ── Trash icon SVG ──
+const TRASH_SVG = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><line x1="10" y1="11" x2="10" y2="17"/><line x1="14" y1="11" x2="14" y2="17"/></svg>`;
+
+// ── Quick delete modal (opened from toolbar button) ──
+function openUndiscordModal() {
+  const ctx = getCurrentContext();
+
+  openModal((mprops) => {
+    const [beforeDate, setBeforeDate] = createSignal("");
+    const [afterDate, setAfterDate] = createSignal("");
+    const [content, setContent] = createSignal("");
+    const [pattern, setPattern] = createSignal("");
+    const [hasLink, setHasLink] = createSignal(false);
+    const [hasFile, setHasFile] = createSignal(false);
+    const [includePinned, setIncludePinned] = createSignal(false);
+    const [showAdvanced, setShowAdvanced] = createSignal(false);
+    const [searchDelay, setSearchDelay] = createSignal("1500");
+    const [deleteDelay, setDeleteDelay] = createSignal("800");
+
+    const [isRunning, setIsRunning] = createSignal(false);
+    const [progress, setProgress] = createSignal(null);
+
+    const start = () => {
+      if (isRunning()) return;
+      setIsRunning(true);
+      setProgress({ status: "starting", deleted: 0, skipped: 0, failed: 0, totalEstimate: 0 });
+
+      runDeletion(
+        {
+          guildId: ctx.guildId,
+          channelId: ctx.channelId,
+          authorId: stores.UserStore?.getCurrentUser()?.id,
+          beforeDate: beforeDate() || undefined,
+          afterDate: afterDate() || undefined,
+          content: content() || undefined,
+          hasLink: hasLink(),
+          hasFile: hasFile(),
+          includeNsfw: true,
+          includePinned: includePinned(),
+          pattern: pattern() || undefined,
+          searchDelay: parseInt(searchDelay()) || 1500,
+          deleteDelay: parseInt(deleteDelay()) || 800,
+        },
+        (p) => {
+          setProgress({ ...p });
+          if (p.status === "done" || p.status === "error") setIsRunning(false);
+        }
+      );
+    };
+
+    const stop = () => { stopDeletion(); setIsRunning(false); };
+
+    const label = ctx.guildId === "@me"
+      ? `DM: ${ctx.channelName || ctx.channelId}`
+      : `#${ctx.channelName || ctx.channelId} in ${ctx.guildName || ctx.guildId}`;
+
+    return (
+      <ModalRoot>
+        <ModalHeader close={mprops.close}>Undiscord - Purge Messages</ModalHeader>
+        <ModalBody>
+          <div class="undiscord-modal-body">
+            <div class="context-info">
+              Deleting your messages in: <b>{label}</b>
+            </div>
+
+            <div class="field">
+              <label>Content Search</label>
+              <TextBox value={content()} onInput={setContent} placeholder="Leave empty for all messages" />
+            </div>
+
+            <div class="field-row">
+              <div class="field">
+                <label>After Date</label>
+                <TextBox value={afterDate()} onInput={setAfterDate} placeholder="YYYY-MM-DD" />
+              </div>
+              <div class="field">
+                <label>Before Date</label>
+                <TextBox value={beforeDate()} onInput={setBeforeDate} placeholder="YYYY-MM-DD" />
+              </div>
+            </div>
+
+            <SwitchItem value={hasLink()} onChange={setHasLink}>Only messages with links</SwitchItem>
+            <SwitchItem value={hasFile()} onChange={setHasFile}>Only messages with files</SwitchItem>
+            <SwitchItem value={includePinned()} onChange={setIncludePinned}>Include pinned messages</SwitchItem>
+
+            <div class="undiscord-advanced" onClick={() => setShowAdvanced(!showAdvanced())}>
+              {showAdvanced() ? "Hide" : "Show"} advanced options
+            </div>
+
+            <Show when={showAdvanced()}>
+              <div style={{ "margin-top": "8px" }}>
+                <div class="field">
+                  <label>Regex Pattern (client-side)</label>
+                  <TextBox value={pattern()} onInput={setPattern} placeholder="e.g. hello|world" />
+                </div>
+                <div class="field-row">
+                  <div class="field">
+                    <label>Search Delay (ms)</label>
+                    <TextBox value={searchDelay()} onInput={setSearchDelay} placeholder="1500" />
+                  </div>
+                  <div class="field">
+                    <label>Delete Delay (ms)</label>
+                    <TextBox value={deleteDelay()} onInput={setDeleteDelay} placeholder="800" />
+                  </div>
+                </div>
+              </div>
+            </Show>
+
+            <div class="undiscord-buttons">
+              <Show when={!isRunning()}>
+                <Button color={ButtonColors.RED} onClick={start}>
+                  Start Deleting
+                </Button>
+              </Show>
+              <Show when={isRunning()}>
+                <Button color={ButtonColors.PRIMARY} onClick={stop}>
+                  Stop
+                </Button>
+              </Show>
+            </div>
+
+            <Show when={progress()}>
+              <div class="undiscord-progress">
+                <div class="stat">Status: <b>{progress().status}</b></div>
+                <div class="stat">
+                  Deleted: <b>{progress().deleted}</b> | Skipped: <b>{progress().skipped}</b> | Failed: <b>{progress().failed}</b>
+                </div>
+                <div class="stat">Estimated total: <b>{progress().totalEstimate}</b></div>
+                <Show when={progress().currentMessage}>
+                  <div class="current-msg">Current: {progress().currentMessage}...</div>
+                </Show>
+                <Show when={progress().error}>
+                  <div style={{ color: "var(--text-danger)", "margin-top": "6px" }}>Error: {progress().error}</div>
+                </Show>
+              </div>
+            </Show>
+          </div>
+        </ModalBody>
+      </ModalRoot>
+    );
+  });
+}
+
+// ── Inject toolbar button ──
+function injectToolbarButton() {
+  // Watch for the toolbar area next to the chat input and inject our button
+  return observeDom('[class*="toolbar_"]', (toolbar) => {
+    if (toolbar.querySelector(".undiscord-btn")) return;
+
+    const btn = document.createElement("div");
+    btn.className = "undiscord-btn";
+    btn.innerHTML = TRASH_SVG;
+    btn.title = "Undiscord - Purge Messages";
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      openUndiscordModal();
+    });
+
+    // Insert at the start of the toolbar
+    toolbar.prepend(btn);
+  });
+}
+
+// ── Full settings panel (kept for advanced use) ──
 function UndiscordPanel() {
   const [guildId, setGuildId] = createSignal(store.guildId || "");
   const [channelId, setChannelId] = createSignal(store.channelId || "");
@@ -348,15 +494,10 @@ function UndiscordPanel() {
   const [isRunning, setIsRunning] = createSignal(false);
   const [progress, setProgress] = createSignal(null);
 
-  // auto-fill current guild/channel
   const fillCurrent = () => {
-    try {
-      const selectedGuild = stores.SelectedGuildStore?.getGuildId();
-      const selectedChannel = stores.SelectedChannelStore?.getChannelId();
-      if (selectedGuild) setGuildId(selectedGuild);
-      else setGuildId("@me");
-      if (selectedChannel) setChannelId(selectedChannel);
-    } catch {}
+    const ctx = getCurrentContext();
+    setGuildId(ctx.guildId);
+    if (ctx.channelId) setChannelId(ctx.channelId);
   };
 
   const start = () => {
@@ -366,7 +507,6 @@ function UndiscordPanel() {
       return;
     }
 
-    // persist settings
     store.guildId = guildId();
     store.channelId = channelId();
     store.beforeDate = beforeDate();
@@ -401,22 +541,17 @@ function UndiscordPanel() {
       },
       (p) => {
         setProgress({ ...p });
-        if (p.status === "done" || p.status === "error") {
-          setIsRunning(false);
-        }
+        if (p.status === "done" || p.status === "error") setIsRunning(false);
       }
     );
   };
 
-  const stop = () => {
-    stopDeletion();
-    setIsRunning(false);
-  };
+  const stop = () => { stopDeletion(); setIsRunning(false); };
 
   return (
-    <div class="undiscord-panel">
+    <div class="undiscord-modal-body">
       <Header tag={HeaderTags.H1}>Undiscord</Header>
-      <Text>Mass delete your own messages. Use Developer Mode to copy IDs.</Text>
+      <Text>Mass delete your own messages. You can also use the trash icon in the channel toolbar.</Text>
       <Divider mt mb />
 
       <div class="field-row">
@@ -431,9 +566,7 @@ function UndiscordPanel() {
       </div>
 
       <div style={{ "margin-bottom": "12px" }}>
-        <Button size={ButtonSizes.SMALL} onClick={fillCurrent}>
-          Fill Current Channel
-        </Button>
+        <Button size={ButtonSizes.SMALL} onClick={fillCurrent}>Fill Current Channel</Button>
       </div>
 
       <div class="field-row">
@@ -448,27 +581,19 @@ function UndiscordPanel() {
       </div>
 
       <div class="field">
-        <label>Content Search (server-side)</label>
+        <label>Content Search</label>
         <TextBox value={content()} onInput={setContent} placeholder="Search text" />
       </div>
 
       <div class="field">
-        <label>Regex Pattern (client-side filter)</label>
+        <label>Regex Pattern</label>
         <TextBox value={pattern()} onInput={setPattern} placeholder="e.g. hello|world" />
       </div>
 
-      <SwitchItem value={hasLink()} onChange={setHasLink}>
-        Only messages with links
-      </SwitchItem>
-      <SwitchItem value={hasFile()} onChange={setHasFile}>
-        Only messages with files
-      </SwitchItem>
-      <SwitchItem value={includeNsfw()} onChange={setIncludeNsfw}>
-        Include NSFW channels
-      </SwitchItem>
-      <SwitchItem value={includePinned()} onChange={setIncludePinned}>
-        Delete pinned messages
-      </SwitchItem>
+      <SwitchItem value={hasLink()} onChange={setHasLink}>Only messages with links</SwitchItem>
+      <SwitchItem value={hasFile()} onChange={setHasFile}>Only messages with files</SwitchItem>
+      <SwitchItem value={includeNsfw()} onChange={setIncludeNsfw}>Include NSFW channels</SwitchItem>
+      <SwitchItem value={includePinned()} onChange={setIncludePinned}>Delete pinned messages</SwitchItem>
 
       <Divider mt mb />
 
@@ -485,35 +610,25 @@ function UndiscordPanel() {
 
       <div class="undiscord-buttons">
         <Show when={!isRunning()}>
-          <Button color={ButtonColors.RED} onClick={start}>
-            Start Deleting
-          </Button>
+          <Button color={ButtonColors.RED} onClick={start}>Start Deleting</Button>
         </Show>
         <Show when={isRunning()}>
-          <Button color={ButtonColors.PRIMARY} onClick={stop}>
-            Stop
-          </Button>
+          <Button color={ButtonColors.PRIMARY} onClick={stop}>Stop</Button>
         </Show>
       </div>
 
       <Show when={progress()}>
         <div class="undiscord-progress">
-          <div class="stat">
-            Status: <b>{progress().status}</b>
-          </div>
+          <div class="stat">Status: <b>{progress().status}</b></div>
           <div class="stat">
             Deleted: <b>{progress().deleted}</b> | Skipped: <b>{progress().skipped}</b> | Failed: <b>{progress().failed}</b>
           </div>
-          <div class="stat">
-            Estimated total: <b>{progress().totalEstimate}</b>
-          </div>
+          <div class="stat">Estimated total: <b>{progress().totalEstimate}</b></div>
           <Show when={progress().currentMessage}>
             <div class="current-msg">Current: {progress().currentMessage}...</div>
           </Show>
           <Show when={progress().error}>
-            <div style={{ color: "var(--text-danger)", "margin-top": "6px" }}>
-              Error: {progress().error}
-            </div>
+            <div style={{ color: "var(--text-danger)", "margin-top": "6px" }}>Error: {progress().error}</div>
           </Show>
         </div>
       </Show>
@@ -524,14 +639,19 @@ function UndiscordPanel() {
 // ── Plugin lifecycle ──
 let cleanupCss;
 let cleanupSection;
+let cleanupObserver;
 
 export function onLoad() {
   cleanupCss = injectCss(styles);
   cleanupSection = registerSection("section", "undiscord", "Undiscord", UndiscordPanel);
+  cleanupObserver = injectToolbarButton();
 }
 
 export function onUnload() {
   stopDeletion();
   cleanupCss?.();
   cleanupSection?.();
+  cleanupObserver?.();
+  // remove any injected buttons
+  document.querySelectorAll(".undiscord-btn").forEach((el) => el.remove());
 }
