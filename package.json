@@ -1,0 +1,10 @@
+{
+  "private": true,
+  "type": "module",
+  "workspaces": ["plugins/*"],
+  "devDependencies": {
+    "@uwu/lune": "^1.5.1",
+    "@uwu/shelter-defs": "^1.4.2",
+    "typescript": "^5.9.3"
+  }
+}
